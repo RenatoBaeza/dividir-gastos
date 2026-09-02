@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
@@ -50,4 +50,31 @@ def health() -> dict:
         "status": "ok",
         "database": database,
         "auth_dev_mode": settings.auth_dev_mode,
+    }
+
+
+# --- TEMPORARY deployment probe -------------------------------------------
+# Every path on the Vercel deployment currently returns FastAPI's own 404,
+# including /docs and /openapi.json, which means the ASGI app is running but
+# never sees the URL the browser asked for. This catch-all reports the path
+# that actually arrives so the rewrite can be fixed. Delete once resolved.
+@app.api_route(
+    "/{_probe:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    include_in_schema=False,
+)
+def _deployment_probe(request: Request) -> dict:
+    return {
+        "probe": "unrouted-request",
+        "asgi_path": request.scope.get("path"),
+        "raw_path": (request.scope.get("raw_path") or b"").decode(errors="replace"),
+        "root_path": request.scope.get("root_path"),
+        "query_string": (request.scope.get("query_string") or b"").decode(),
+        "url": str(request.url),
+        "vercel_headers": {
+            k: v for k, v in request.headers.items() if k.lower().startswith("x-")
+        },
+        "known_routes": sorted(
+            {getattr(r, "path", "") for r in app.routes} - {"/{_probe:path}"}
+        ),
     }
