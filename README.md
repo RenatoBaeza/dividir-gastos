@@ -7,7 +7,7 @@ payments possible.
 | Piece    | Stack                                                   | Deploys to    |
 | -------- | ------------------------------------------------------- | ------------- |
 | Frontend | React + TypeScript + Tailwind v4 + shadcn/ui (Vite)      | Vercel        |
-| Backend  | FastAPI + SQLAlchemy 2 (sync, psycopg 3)                 | FastAPI Cloud |
+| Backend  | FastAPI + SQLAlchemy 2 (sync, psycopg 3)                 | Vercel        |
 | Database | Supabase Postgres                                        | Supabase      |
 | Auth     | Supabase Auth, email + password                          | Supabase      |
 
@@ -212,15 +212,37 @@ on and no policies are defined, so the anon and authenticated keys cannot read
 these tables at all — the API connects as the Postgres role and does its own
 authorisation. Keep it that way.
 
-**Backend → FastAPI Cloud.** From `backend/`, `fastapi deploy`. Set
-`DATABASE_URL`, `SUPABASE_URL`, `CORS_ORIGINS` (your Vercel URL), and
-`SUPABASE_JWT_SECRET` only if the project still uses legacy HS256. Leave
-`AUTH_DEV_MODE` unset.
+Both halves are separate Vercel projects pointed at the same repository, each
+with its own **Root Directory**.
+
+**Backend → Vercel.** Root directory `backend`. `api/index.py` re-exports the
+ASGI app and `vercel.json` rewrites every path to it, so FastAPI keeps doing its
+own routing. Environment variables:
+
+| Variable | Value |
+| --- | --- |
+| `DATABASE_URL` | Supabase **transaction pooler**, port **6543** |
+| `SUPABASE_URL` | `https://<ref>.supabase.co` |
+| `CORS_ORIGINS` | the frontend's production URL |
+| `CORS_ORIGIN_REGEX` | optional, to allow preview deployments |
+| `SUPABASE_JWT_SECRET` | only for projects still on legacy HS256 |
+| `AUTH_DEV_MODE` | leave unset — it accepts any identity |
+
+Port 6543, not 5432: a serverless function is short-lived and highly concurrent,
+so `db.py` switches to `NullPool` and turns off prepared statements whenever
+`VERCEL` is set. Holding a pooled connection across a function freeze would
+exhaust the session pooler instead.
 
 **Frontend → Vercel.** Root directory `frontend`. `vercel.json` already sets the
-build command and the SPA rewrite. Environment variables: `VITE_API_URL`,
-`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`. Leave `VITE_AUTH_DEV_EMAIL`
-unset.
+build command and the SPA rewrite. Environment variables: `VITE_API_URL`
+(the backend project's URL), `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`.
+Leave `VITE_AUTH_DEV_EMAIL` unset. These are baked in at build time, so changing
+one needs a redeploy, not just a restart.
+
+**Turn off Deployment Protection on the backend project** (Settings → Deployment
+Protection → Vercel Authentication). While it is on, every request 302s to
+`vercel.com/sso-api`, which a browser cannot follow cross-origin — the CORS
+preflight fails before any of your code runs.
 
 ---
 
