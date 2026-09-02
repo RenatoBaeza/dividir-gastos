@@ -1,0 +1,169 @@
+import { devEmail, supabase } from './supabase'
+import type {
+  Activity,
+  Balances,
+  Expense,
+  ExpenseInput,
+  Group,
+  GroupSummary,
+  ImportPreview,
+  ImportRequest,
+  ImportResult,
+  Invite,
+  Money,
+  Rate,
+  Settlement,
+  SettlementMethod,
+  User,
+} from '@/types'
+
+const BASE_URL = (import.meta.env.VITE_API_URL ?? 'http://localhost:8000').replace(
+  /\/$/,
+  '',
+)
+
+export class ApiError extends Error {
+  status: number
+
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+async function authHeader(): Promise<Record<string, string>> {
+  if (devEmail) return { Authorization: `Dev ${devEmail}` }
+  if (!supabase) return {}
+  const { data } = await supabase.auth.getSession()
+  const token = data.session?.access_token
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+async function request<T>(
+  path: string,
+  init: RequestInit & { query?: Record<string, string | number | undefined> } = {},
+): Promise<T> {
+  const { query, ...rest } = init
+  const url = new URL(BASE_URL + path)
+  for (const [key, value] of Object.entries(query ?? {})) {
+    if (value !== undefined && value !== '') url.searchParams.set(key, String(value))
+  }
+
+  const response = await fetch(url, {
+    ...rest,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(await authHeader()),
+      ...rest.headers,
+    },
+  })
+
+  if (response.status === 204) return undefined as T
+  const text = await response.text()
+  const body = text ? JSON.parse(text) : null
+
+  if (!response.ok) {
+    const detail = body?.detail
+    const message =
+      typeof detail === 'string'
+        ? detail
+        : Array.isArray(detail)
+          ? detail.map((d: { msg?: string }) => d.msg ?? '').join(', ')
+          : `Request failed (${response.status})`
+    throw new ApiError(response.status, message)
+  }
+
+  return body as T
+}
+
+const json = (body: unknown) => ({ body: JSON.stringify(body) })
+
+export const api = {
+  me: () => request<User>('/me'),
+  updateMe: (display_name: string) =>
+    request<User>('/me', { method: 'PATCH', ...json({ display_name }) }),
+
+  // --- groups -------------------------------------------------------------
+  listGroups: () => request<GroupSummary[]>('/groups'),
+  getGroup: (id: string) => request<Group>(`/groups/${id}`),
+  createGroup: (body: { name: string; description: string; base_currency: string }) =>
+    request<Group>('/groups', { method: 'POST', ...json(body) }),
+  updateGroup: (
+    id: string,
+    body: Partial<{ name: string; description: string; base_currency: string }>,
+  ) => request<Group>(`/groups/${id}`, { method: 'PATCH', ...json(body) }),
+  deleteGroup: (id: string) => request<void>(`/groups/${id}`, { method: 'DELETE' }),
+  removeMember: (groupId: string, userId: string) =>
+    request<void>(`/groups/${groupId}/members/${userId}`, { method: 'DELETE' }),
+
+  // --- invites ------------------------------------------------------------
+  listGroupInvites: (groupId: string) =>
+    request<Invite[]>(`/groups/${groupId}/invites`),
+  invite: (groupId: string, email: string) =>
+    request<Invite>(`/groups/${groupId}/invites`, { method: 'POST', ...json({ email }) }),
+  revokeInvite: (groupId: string, inviteId: string) =>
+    request<void>(`/groups/${groupId}/invites/${inviteId}`, { method: 'DELETE' }),
+  myInvites: () => request<Invite[]>('/invites'),
+  acceptInvite: (inviteId: string) =>
+    request<User>(`/invites/${inviteId}/accept`, { method: 'POST' }),
+  declineInvite: (inviteId: string) =>
+    request<void>(`/invites/${inviteId}/decline`, { method: 'POST' }),
+
+  // --- rates --------------------------------------------------------------
+  listRates: (groupId: string) => request<Rate[]>(`/groups/${groupId}/rates`),
+  setRate: (groupId: string, currency: string, rate_to_base: Money) =>
+    request<Rate>(`/groups/${groupId}/rates`, {
+      method: 'PUT',
+      ...json({ currency, rate_to_base }),
+    }),
+  deleteRate: (groupId: string, currency: string) =>
+    request<void>(`/groups/${groupId}/rates/${currency}`, { method: 'DELETE' }),
+
+  // --- expenses -----------------------------------------------------------
+  listExpenses: (groupId: string, filters: { category?: string; q?: string } = {}) =>
+    request<Expense[]>('/expenses', { query: { group_id: groupId, ...filters } }),
+  listPersonalExpenses: () => request<Expense[]>('/expenses/personal'),
+  getExpense: (id: string) => request<Expense>(`/expenses/${id}`),
+  createExpense: (body: ExpenseInput) =>
+    request<Expense>('/expenses', { method: 'POST', ...json(body) }),
+  updateExpense: (id: string, body: Partial<ExpenseInput>) =>
+    request<Expense>(`/expenses/${id}`, { method: 'PATCH', ...json(body) }),
+  deleteExpense: (id: string) => request<void>(`/expenses/${id}`, { method: 'DELETE' }),
+
+  // --- settlements --------------------------------------------------------
+  listSettlements: (groupId: string) =>
+    request<Settlement[]>('/settlements', { query: { group_id: groupId } }),
+  recordSettlement: (
+    groupId: string,
+    body: {
+      from_user_id: string
+      to_user_id: string
+      currency: string
+      amount: Money
+      method: SettlementMethod
+      note: string
+      settled_on: string
+    },
+  ) =>
+    request<Settlement>('/settlements', {
+      method: 'POST',
+      query: { group_id: groupId },
+      ...json(body),
+    }),
+  deleteSettlement: (id: string) =>
+    request<void>(`/settlements/${id}`, { method: 'DELETE' }),
+
+  // --- importing ----------------------------------------------------------
+  previewSplitwise: (csv: string) =>
+    request<ImportPreview>('/imports/splitwise/preview', {
+      method: 'POST',
+      ...json({ csv }),
+    }),
+  importSplitwise: (body: ImportRequest) =>
+    request<ImportResult>('/imports/splitwise', { method: 'POST', ...json(body) }),
+
+  // --- balances & activity ------------------------------------------------
+  balances: (groupId: string) => request<Balances>(`/groups/${groupId}/balances`),
+  activity: (groupId: string) => request<Activity[]>(`/groups/${groupId}/activity`),
+}
