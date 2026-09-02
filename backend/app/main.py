@@ -58,6 +58,24 @@ def health() -> dict:
 # including /docs and /openapi.json, which means the ASGI app is running but
 # never sees the URL the browser asked for. This catch-all reports the path
 # that actually arrives so the rewrite can be fixed. Delete once resolved.
+def _all_paths(router) -> set[str]:
+    """Starlette 1.6 nests included routers, so walk them instead of reading
+    `app.routes` directly - a flat read only reports the app-level routes."""
+    found: set[str] = set()
+    for route in getattr(router, "routes", []):
+        path = getattr(route, "path", None)
+        if path is not None:
+            found.add(path)
+        inner = (
+            getattr(route, "original_router", None)
+            or getattr(route, "router", None)
+            or getattr(route, "app", None)
+        )
+        if inner is not None and inner is not router:
+            found |= _all_paths(inner)
+    return found
+
+
 @app.api_route(
     "/{_probe:path}",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
@@ -74,7 +92,5 @@ def _deployment_probe(request: Request) -> dict:
         "vercel_headers": {
             k: v for k, v in request.headers.items() if k.lower().startswith("x-")
         },
-        "known_routes": sorted(
-            {getattr(r, "path", "") for r in app.routes} - {"/{_probe:path}"}
-        ),
+        "known_routes": sorted(_all_paths(app.router) - {"/{_probe:path}"}),
     }
