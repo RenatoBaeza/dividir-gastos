@@ -77,6 +77,11 @@ export function ImportSplitwiseDialog({
   const [rates, setRates] = useState<Record<string, string>>({})
 
   const existing = groups.find((g) => g.id === target)
+  // Base UI shows the raw value in the trigger unless it is given the labels.
+  const targetItems = [
+    { value: NEW_GROUP, label: 'A new group' },
+    ...groups.map((g) => ({ value: g.id, label: g.name })),
+  ]
   const base = existing ? existing.base_currency : baseCurrency
   const needsRates = (preview?.currencies ?? [])
     .map((c) => c.code)
@@ -182,9 +187,9 @@ export function ImportSplitwiseDialog({
         Import from Splitwise
       </DialogTrigger>
 
-      <DialogContent className="sm:max-w-3xl">
-        <form onSubmit={submit}>
-          <DialogHeader>
+      <DialogContent className="max-h-[92vh] gap-0 overflow-hidden p-0 sm:max-w-3xl">
+        <form onSubmit={submit} className="flex max-h-[92vh] flex-col">
+          <DialogHeader className="border-b p-6">
             <DialogTitle>Import from Splitwise</DialogTitle>
             <DialogDescription>
               In Splitwise, open the group, then{' '}
@@ -193,8 +198,8 @@ export function ImportSplitwiseDialog({
             </DialogDescription>
           </DialogHeader>
 
-          <ScrollArea className="-mx-6 max-h-[60vh] px-6">
-            <div className="grid gap-5 py-4">
+          <ScrollArea className="flex-1 overflow-y-auto">
+            <div className="grid gap-5 p-6">
               <div className="grid gap-2">
                 <Label htmlFor="import-file">Splitwise export</Label>
                 <Input
@@ -247,6 +252,7 @@ export function ImportSplitwiseDialog({
                     <div className="grid gap-2">
                       <Label>Import into</Label>
                       <Select
+                        items={targetItems}
                         value={target}
                         onValueChange={(value) => setTarget(value ?? NEW_GROUP)}
                       >
@@ -459,7 +465,7 @@ export function ImportSplitwiseDialog({
             </div>
           </ScrollArea>
 
-          <DialogFooter>
+          <DialogFooter className="mx-0 mb-0 border-t p-4">
             <Button
               type="button"
               variant="ghost"
