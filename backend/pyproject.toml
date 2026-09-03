@@ -39,6 +39,10 @@ extend-immutable-calls = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `python -m pytest` puts the working directory on sys.path; the bare `pytest`
+# console script does not, so `import app` only worked one of the two ways it
+# gets run. This makes both work — including in CI.
+pythonpath = ["."]
 # A warning from a dependency today is a break after tomorrow's upgrade, so the
 # suite is kept clean rather than noisy.
 filterwarnings = [
