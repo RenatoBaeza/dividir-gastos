@@ -54,7 +54,9 @@ cd backend
 .venv/Scripts/uvicorn app.main:app --reload --port 8000
 ```
 
-Interactive docs at <http://localhost:8000/docs>, health at `/health`.
+Interactive docs at <http://localhost:8000/docs>. `/health` is the liveness
+probe (it answers without touching Postgres) and `/health/ready` is the
+readiness one (it round-trips to the database and 503s when it cannot).
 
 ### 3. Frontend
 
@@ -119,6 +121,57 @@ session until the link is clicked. Two things to know before you rely on that:
 
 Add your deployed URL and `http://localhost:5173` under Authentication → URL
 Configuration, since that is where the confirmation and reset links come back to.
+
+---
+
+## How the API behaves
+
+**Every error looks the same.** Whatever fails — a rejected payload, a missing
+group, a constraint violation, a bug — comes back as:
+
+```json
+{
+  "detail": "Group not found",
+  "error": { "code": "not_found", "status": 404, "request_id": "9f2c…" }
+}
+```
+
+`detail` is what a person should read; `code` is what a client should branch on.
+Internal failures never carry a driver message or a traceback — those go to the
+log, under the same `request_id` the caller was given.
+
+**Every request has an id.** Sent back as `X-Request-ID`, echoed if the caller
+supplied one, and attached to every log line the request produces, so a report of
+"it broke at 14:32" is one search away from the exact failure.
+
+**Logs are structured.** JSON lines everywhere except a development machine
+(`LOG_JSON` overrides), one access line per request with method, path, status,
+duration and the authenticated user. Health checks are excluded so uptime polling
+does not drown the log.
+
+**Limits.** Bodies over `MAX_REQUEST_BYTES` are refused with a 413 before they
+are read into memory; callers get a token-bucket budget keyed on their token
+(falling back to their address), with a much tighter one for `/imports`, which
+parses and writes hundreds of rows per call. The limiter lives in the process, so
+on serverless each warm instance enforces its own copy — it is a safety net
+against one client hammering one instance, not an account-wide quota. Put a real
+quota in front of the app if you need one.
+
+**Databases are held on a short leash.** Connections carry a `statement_timeout`,
+a `lock_timeout` and an `idle_in_transaction_session_timeout`, so a runaway query
+or a transaction orphaned by a killed invocation cannot hold a pooler slot open.
+Each request is one transaction: it commits when the handler returns and rolls
+back on any exception.
+
+**Bad configuration fails at boot, not at request time.** In production the app
+refuses to start with the dev-auth bypass enabled, with the local database
+default still in place, with no way to verify a token, or with a wildcard CORS
+origin. A crash the platform surfaces immediately beats a server that quietly
+trusts the wrong things.
+
+**Dependencies are pinned.** `requirements.txt` uses `==`, so what runs in
+production is what the tests ran against. Bump deliberately.
+
 
 ---
 
@@ -189,7 +242,7 @@ currency and this app never fetches a rate on its own.
 
 ```bash
 cd backend
-.venv/Scripts/python -m pytest          # split and balance maths, no database
+.venv/Scripts/python -m pytest          # maths, tokens, config, middleware — no database
 AUTH_DEV_MODE=true .venv/Scripts/python scripts/smoke.py
 ```
 
@@ -222,11 +275,13 @@ own routing. Environment variables:
 | Variable | Value |
 | --- | --- |
 | `DATABASE_URL` | Supabase **transaction pooler**, port **6543** |
+| `ENVIRONMENT` | `production` — optional, `VERCEL_ENV` already implies it |
 | `SUPABASE_URL` | `https://<ref>.supabase.co` |
 | `CORS_ORIGINS` | the frontend's production URL |
 | `CORS_ORIGIN_REGEX` | optional, to allow preview deployments |
 | `SUPABASE_JWT_SECRET` | only for projects still on legacy HS256 |
-| `AUTH_DEV_MODE` | leave unset — it accepts any identity |
+| `AUTH_DEV_MODE` | leave unset — it accepts any identity, and production refuses to boot with it on |
+| `DOCS_ENABLED` | `false` to keep `/docs` and the schema private |
 
 Port 6543, not 5432: a serverless function is short-lived and highly concurrent,
 so `db.py` switches to `NullPool` and turns off prepared statements whenever

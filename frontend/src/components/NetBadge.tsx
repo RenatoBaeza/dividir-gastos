@@ -1,7 +1,6 @@
-import { formatMoney, num } from '@/lib/format'
-import { cn } from '@/lib/utils'
+import { MoneyDelta } from '@/components/MoneyDelta'
 
-/** Green when the group owes you, red when you owe, muted when square. */
+/** Your own position in a group: green when you are owed, red when you owe. */
 export function NetBadge({
   amount,
   currency,
@@ -13,20 +12,13 @@ export function NetBadge({
   className?: string
   showLabel?: boolean
 }) {
-  const value = num(amount)
-  const tone =
-    value > 0
-      ? 'text-emerald-600 dark:text-emerald-400'
-      : value < 0
-        ? 'text-rose-600 dark:text-rose-400'
-        : 'text-muted-foreground'
-
-  const label = value > 0 ? 'you are owed' : value < 0 ? 'you owe' : 'settled up'
-
   return (
-    <span className={cn('tabular-nums font-medium', tone, className)}>
-      {showLabel ? <span className="mr-1 text-xs font-normal">{label}</span> : null}
-      {value === 0 && showLabel ? null : formatMoney(amount, currency)}
-    </span>
+    <MoneyDelta
+      amount={amount}
+      currency={currency}
+      className={className}
+      showLabel={showLabel}
+      labels={['you are owed', 'you owe', 'settled up']}
+    />
   )
 }

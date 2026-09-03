@@ -34,7 +34,8 @@ def _name(db: Session, user_id: uuid.UUID) -> str:
 @router.get("", response_model=list[SettlementOut])
 def list_settlements(
     group_id: uuid.UUID,
-    limit: int = Query(default=200, le=500),
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     user: AppUser = Depends(current_user),
 ) -> list[SettlementOut]:
@@ -44,6 +45,7 @@ def list_settlements(
         .where(Settlement.group_id == group_id, Settlement.deleted_at.is_(None))
         .order_by(Settlement.settled_on.desc(), Settlement.created_at.desc())
         .limit(limit)
+        .offset(offset)
     ).all()
     return [SettlementOut.model_validate(r) for r in rows]
 

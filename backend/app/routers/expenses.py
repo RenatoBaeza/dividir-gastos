@@ -235,8 +235,8 @@ def _replace_items(db: Session, expense: Expense, items: list[ItemIn]) -> None:
 # --------------------------------------------------------------------------
 @router.get("/personal", response_model=list[ExpenseOut])
 def list_personal_expenses(
-    limit: int = Query(default=100, le=500),
-    offset: int = 0,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     user: AppUser = Depends(current_user),
 ) -> list[ExpenseOut]:
@@ -253,10 +253,10 @@ def list_personal_expenses(
 @router.get("", response_model=list[ExpenseOut])
 def list_group_expenses(
     group_id: uuid.UUID,
-    category: str | None = None,
-    q: str | None = None,
-    limit: int = Query(default=200, le=500),
-    offset: int = 0,
+    category: str | None = Query(default=None, max_length=40),
+    q: str | None = Query(default=None, max_length=200),
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     user: AppUser = Depends(current_user),
 ) -> list[ExpenseOut]:

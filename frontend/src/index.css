@@ -126,5 +126,47 @@
     }
   html {
     @apply font-sans;
+    /* Anchors and the skip link should land below the sticky header rather
+       than under it. */
+    scroll-padding-top: 4.5rem;
+    -webkit-text-size-adjust: 100%;
     }
+
+  /* Some people get motion sickness from the things that make an interface
+     feel lively. Honour the setting they already told their OS about. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+      }
+  }
+
+  /* Money and counts must never reflow as digits change width. */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+    }
+}
+
+@layer components {
+  /* Icon-only controls sit at 36px, under the 44px that fingers actually need.
+     This grows the touch target without moving anything on screen. */
+  @media (pointer: coarse) {
+    button,
+    [role='button'],
+    a[href] {
+      touch-action: manipulation;
+      }
+    button[data-slot='button'][class*='size-icon']::after {
+      content: '';
+      position: absolute;
+      inset: -6px;
+      }
+    button[data-slot='button'][class*='size-icon'] {
+      position: relative;
+      }
+  }
 }

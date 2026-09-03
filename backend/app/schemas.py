@@ -10,6 +10,10 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints
 Currency = Annotated[
     str, StringConstraints(min_length=3, max_length=3, to_upper=True, pattern=r"^[A-Za-z]{3}$")
 ]
+# Names and descriptions are trimmed before they are measured, so a field of
+# spaces is rejected instead of being stored as an empty string.
+Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
+Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 SplitType = Literal["equal", "exact", "percent", "shares", "items"]
 SettlementMethod = Literal["in_app", "outside"]
 
@@ -65,13 +69,13 @@ class RateUpsert(BaseModel):
 
 
 class GroupCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
+    name: Name
     description: str = ""
     base_currency: Currency = "USD"
 
 
 class GroupUpdate(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=120)
+    name: Name | None = None
     description: str | None = None
     base_currency: Currency | None = None
 
@@ -127,14 +131,14 @@ class ParticipantIn(BaseModel):
 
 
 class ItemIn(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
+    name: Title
     amount: Decimal = Field(ge=0)
     quantity: Decimal = Field(default=Decimal(1), gt=0)
     shared_with: list[uuid.UUID] = []
 
 
 class ExpenseBase(BaseModel):
-    description: str = Field(min_length=1, max_length=200)
+    description: Title
     notes: str = ""
     category: str = "general"
     currency: Currency = "USD"
@@ -152,7 +156,7 @@ class ExpenseCreate(ExpenseBase):
 
 
 class ExpenseUpdate(BaseModel):
-    description: str | None = Field(default=None, min_length=1, max_length=200)
+    description: Title | None = None
     notes: str | None = None
     category: str | None = None
     currency: Currency | None = None

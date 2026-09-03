@@ -1,8 +1,10 @@
 import { useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { AlertTriangle, Download, FileUp, Loader2 } from 'lucide-react'
+import { AlertTriangle, Download, FileUp, Loader2, Upload, UserCheck } from 'lucide-react'
 import { toast } from 'sonner'
 
+import { AmountInput } from '@/components/AmountInput'
+import { useConfirm } from '@/components/ConfirmDialog'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
@@ -33,7 +35,16 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { api } from '@/lib/api'
-import { CURRENCIES, categoryIcon, formatDate, formatMoney, num } from '@/lib/format'
+import {
+  CURRENCIES,
+  categoryIcon,
+  formatDate,
+  formatMoney,
+  looksLikeEmail,
+  num,
+  pluralize,
+} from '@/lib/format'
+import { cn } from '@/lib/utils'
 import type { GroupSummary, ImportPreview } from '@/types'
 
 const NEW_GROUP = '__new__'
@@ -56,19 +67,18 @@ interface Props {
   onImported: () => void
 }
 
-export function ImportSplitwiseDialog({
-  groups,
-  currentUserEmail,
-  onImported,
-}: Props) {
+export function ImportSplitwiseDialog({ groups, currentUserEmail, onImported }: Props) {
   const navigate = useNavigate()
+  const confirm = useConfirm()
   const fileInput = useRef<HTMLInputElement>(null)
 
   const [open, setOpen] = useState(false)
   const [csv, setCsv] = useState('')
+  const [fileName, setFileName] = useState('')
   const [preview, setPreview] = useState<ImportPreview | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [dragging, setDragging] = useState(false)
 
   const [target, setTarget] = useState(NEW_GROUP)
   const [groupName, setGroupName] = useState('')
@@ -89,29 +99,35 @@ export function ImportSplitwiseDialog({
 
   function reset() {
     setCsv('')
+    setFileName('')
     setPreview(null)
     setError(null)
     setTarget(NEW_GROUP)
     setGroupName('')
     setEmails({})
     setRates({})
+    setDragging(false)
     if (fileInput.current) fileInput.current.value = ''
   }
 
   async function readFile(file: File) {
+    if (!/\.csv$/i.test(file.name) && file.type !== 'text/csv') {
+      setError(`“${file.name}” is not a CSV. In Splitwise, use Export as spreadsheet.`)
+      return
+    }
+
     setBusy(true)
     setError(null)
     try {
       const text = await file.text()
       const result = await api.previewSplitwise(text)
       setCsv(text)
+      setFileName(file.name)
       setPreview(result)
       setGroupName(groupNameFromFile(file.name))
       setBaseCurrency(result.suggested_base_currency)
       setEmails(
-        Object.fromEntries(
-          result.people.map((p) => [p.name, p.suggested_email ?? '']),
-        ),
+        Object.fromEntries(result.people.map((p) => [p.name, p.suggested_email ?? ''])),
       )
       setRates({})
     } catch (err) {
@@ -125,6 +141,11 @@ export function ImportSplitwiseDialog({
   async function submit(event: React.FormEvent) {
     event.preventDefault()
     if (!preview) return
+
+    if (blocker) {
+      toast.error(blocker)
+      return
+    }
 
     setBusy(true)
     try {
@@ -140,12 +161,13 @@ export function ImportSplitwiseDialog({
         })),
         people: preview.people.map((p) => ({
           name: p.name,
-          email: emails[p.name].trim(),
+          email: (emails[p.name] ?? '').trim(),
         })),
       })
 
-      const bits = [`${result.expenses_created} expenses`]
-      if (result.settlements_created) bits.push(`${result.settlements_created} repayments`)
+      const bits = [pluralize(result.expenses_created, 'expense')]
+      if (result.settlements_created)
+        bits.push(pluralize(result.settlements_created, 'repayment'))
       if (result.duplicates_skipped) bits.push(`${result.duplicates_skipped} already there`)
       toast.success(`Imported ${bits.join(', ')} into “${result.group_name}”`)
 
@@ -165,30 +187,53 @@ export function ImportSplitwiseDialog({
     }
   }
 
-  const missingEmail = preview?.people.some((p) => !emails[p.name]?.trim())
-  const missingRate = needsRates.some((code) => num(rates[code]) <= 0)
-  const canSubmit =
-    !!preview &&
-    !busy &&
-    !missingEmail &&
-    !missingRate &&
-    (!!existing || !!groupName.trim())
+  const badEmail = preview?.people.find((p) => !looksLikeEmail(emails[p.name] ?? ''))
+  const missingRate = needsRates.find((code) => num(rates[code]) <= 0)
+  const meMapped = preview?.people.some(
+    (p) => (emails[p.name] ?? '').trim().toLowerCase() === currentUserEmail.toLowerCase(),
+  )
+
+  /** One sentence naming the next thing to do, instead of a dead button. */
+  const blocker = !preview
+    ? 'Choose a Splitwise CSV first.'
+    : !existing && !groupName.trim()
+      ? 'Give the new group a name.'
+      : badEmail
+        ? `Add a valid email address for ${badEmail.name}.`
+        : missingRate
+          ? `Set the ${missingRate} exchange rate.`
+          : null
+
+  async function requestClose(next: boolean) {
+    if (next) {
+      setOpen(true)
+      return
+    }
+    if (busy) return
+
+    if (preview) {
+      const ok = await confirm({
+        title: 'Discard this import?',
+        description: 'Nothing has been written yet. You would need to pick the file again.',
+        confirmLabel: 'Discard',
+        cancelLabel: 'Keep going',
+        destructive: true,
+      })
+      if (!ok) return
+    }
+    setOpen(false)
+    reset()
+  }
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        setOpen(next)
-        if (!next) reset()
-      }}
-    >
+    <Dialog open={open} onOpenChange={(next) => void requestClose(next)}>
       <DialogTrigger render={<Button variant="outline" />}>
         <Download className="size-4" aria-hidden />
         Import from Splitwise
       </DialogTrigger>
 
       <DialogContent className="max-h-[92vh] gap-0 overflow-hidden p-0 sm:max-w-3xl">
-        <form onSubmit={submit} className="flex max-h-[92vh] flex-col">
+        <form onSubmit={submit} noValidate className="flex max-h-[92vh] flex-col">
           <DialogHeader className="border-b p-6">
             <DialogTitle>Import from Splitwise</DialogTitle>
             <DialogDescription>
@@ -200,13 +245,42 @@ export function ImportSplitwiseDialog({
 
           <ScrollArea className="flex-1 overflow-y-auto">
             <div className="grid gap-5 p-6">
-              <div className="grid gap-2">
-                <Label htmlFor="import-file">Splitwise export</Label>
+              {/* The description promised a drop target, so this is one. */}
+              <div
+                onDragOver={(event) => {
+                  event.preventDefault()
+                  setDragging(true)
+                }}
+                onDragLeave={() => setDragging(false)}
+                onDrop={(event) => {
+                  event.preventDefault()
+                  setDragging(false)
+                  const file = event.dataTransfer.files?.[0]
+                  if (file) void readFile(file)
+                }}
+                className={cn(
+                  'grid gap-3 rounded-lg border-2 border-dashed p-5 text-center transition-colors',
+                  dragging ? 'border-primary bg-primary/5' : 'border-muted-foreground/25',
+                )}
+              >
+                <Upload className="mx-auto size-6 text-muted-foreground" aria-hidden />
+                <div>
+                  <p className="text-sm font-medium">
+                    {fileName || 'Drop the Splitwise CSV here'}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {fileName ? 'Drop another file to start over.' : 'or choose it below'}
+                  </p>
+                </div>
+                <Label htmlFor="import-file" className="sr-only">
+                  Splitwise export
+                </Label>
                 <Input
                   id="import-file"
                   ref={fileInput}
                   type="file"
                   accept=".csv,text/csv"
+                  className="mx-auto max-w-xs"
                   onChange={(e) => {
                     const file = e.target.files?.[0]
                     if (file) void readFile(file)
@@ -215,7 +289,10 @@ export function ImportSplitwiseDialog({
               </div>
 
               {busy && !preview ? (
-                <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                <p
+                  role="status"
+                  className="flex items-center gap-2 text-sm text-muted-foreground"
+                >
                   <Loader2 className="size-4 animate-spin" aria-hidden />
                   Reading the file…
                 </p>
@@ -232,31 +309,26 @@ export function ImportSplitwiseDialog({
               {preview ? (
                 <>
                   <p className="text-sm text-muted-foreground">
-                    {preview.expense_count} expense
-                    {preview.expense_count === 1 ? '' : 's'}
+                    {pluralize(preview.expense_count, 'expense')}
                     {preview.settlement_count
-                      ? ` and ${preview.settlement_count} repayment${
-                          preview.settlement_count === 1 ? '' : 's'
-                        }`
+                      ? ` and ${pluralize(preview.settlement_count, 'repayment')}`
                       : ''}{' '}
                     between {preview.people.length} people
                     {preview.first_date && preview.last_date
-                      ? `, ${formatDate(preview.first_date)} to ${formatDate(
-                          preview.last_date,
-                        )}`
+                      ? `, ${formatDate(preview.first_date)} to ${formatDate(preview.last_date)}`
                       : ''}
                     .
                   </p>
 
                   <div className="grid gap-3 sm:grid-cols-2">
                     <div className="grid gap-2">
-                      <Label>Import into</Label>
+                      <Label htmlFor="import-target">Import into</Label>
                       <Select
                         items={targetItems}
                         value={target}
                         onValueChange={(value) => setTarget(value ?? NEW_GROUP)}
                       >
-                        <SelectTrigger className="w-full">
+                        <SelectTrigger id="import-target" className="w-full">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -272,8 +344,12 @@ export function ImportSplitwiseDialog({
 
                     {existing ? (
                       <div className="grid gap-2">
-                        <Label>Base currency</Label>
-                        <Input value={existing.base_currency} disabled />
+                        <Label htmlFor="import-existing-currency">Base currency</Label>
+                        <Input
+                          id="import-existing-currency"
+                          value={existing.base_currency}
+                          readOnly
+                        />
                         <p className="text-xs text-muted-foreground">
                           Set by the group you are importing into.
                         </p>
@@ -286,16 +362,16 @@ export function ImportSplitwiseDialog({
                             id="import-name"
                             value={groupName}
                             onChange={(e) => setGroupName(e.target.value)}
-                            required
+                            aria-invalid={groupName.trim() ? undefined : true}
                           />
                         </div>
                         <div className="grid gap-2">
-                          <Label>Base currency</Label>
+                          <Label htmlFor="import-currency">Base currency</Label>
                           <Select
                             value={baseCurrency}
                             onValueChange={(value) => setBaseCurrency(value ?? '')}
                           >
-                            <SelectTrigger className="w-full">
+                            <SelectTrigger id="import-currency" className="w-full">
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
@@ -314,51 +390,78 @@ export function ImportSplitwiseDialog({
                   <div className="grid gap-2">
                     <Label>Who is who</Label>
                     <p className="text-xs text-muted-foreground">
-                      Splitwise exports names, not addresses. Give each person
-                      the email they sign in with — they become members straight
-                      away and see the group the moment they sign in.
+                      Splitwise exports names, not addresses. Give each person the
+                      email they sign in with — they become members straight away
+                      and see the group the moment they sign in.
                     </p>
                     <div className="grid gap-2">
-                      {preview.people.map((person) => (
-                        <div
-                          key={person.name}
-                          className="grid items-center gap-2 sm:grid-cols-[1fr_1.4fr]"
-                        >
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-medium">
-                              {person.name}
-                            </p>
-                            <p className="truncate text-xs text-muted-foreground">
-                              {Object.entries(person.nets)
-                                .map(([code, value]) =>
-                                  formatMoney(value, code, { signed: true }),
-                                )
-                                .join(' · ') || 'no balance'}
-                            </p>
+                      {preview.people.map((person) => {
+                        const value = emails[person.name] ?? ''
+                        const isMe =
+                          value.trim().toLowerCase() === currentUserEmail.toLowerCase()
+                        return (
+                          <div
+                            key={person.name}
+                            className="grid items-center gap-2 sm:grid-cols-[1fr_1.4fr]"
+                          >
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-medium">{person.name}</p>
+                              <p className="truncate text-xs text-muted-foreground">
+                                {Object.entries(person.nets)
+                                  .map(([code, v]) => formatMoney(v, code, { signed: true }))
+                                  .join(' · ') || 'no balance'}
+                              </p>
+                            </div>
+                            <div className="flex gap-2">
+                              <Input
+                                type="email"
+                                autoCapitalize="none"
+                                autoCorrect="off"
+                                spellCheck={false}
+                                aria-label={`Email address for ${person.name}`}
+                                aria-invalid={
+                                  value && !looksLikeEmail(value) ? true : undefined
+                                }
+                                placeholder={person.suggested_email ?? 'name@example.com'}
+                                value={value}
+                                onChange={(e) =>
+                                  setEmails((prev) => ({
+                                    ...prev,
+                                    [person.name]: e.target.value,
+                                  }))
+                                }
+                              />
+                              {/* Typing your own address once per import is the
+                                  most repeated keystroke on this screen. */}
+                              {currentUserEmail && !meMapped ? (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="icon"
+                                  aria-label={`This is me — use ${currentUserEmail}`}
+                                  title={`This is me (${currentUserEmail})`}
+                                  onClick={() =>
+                                    setEmails((prev) => ({
+                                      ...prev,
+                                      [person.name]: currentUserEmail,
+                                    }))
+                                  }
+                                >
+                                  <UserCheck className="size-4" aria-hidden />
+                                </Button>
+                              ) : null}
+                              {isMe ? (
+                                <span className="grid w-9 shrink-0 place-items-center text-xs text-muted-foreground">
+                                  you
+                                </span>
+                              ) : null}
+                            </div>
                           </div>
-                          <Input
-                            type="email"
-                            required
-                            placeholder={
-                              person.suggested_email ?? 'name@example.com'
-                            }
-                            value={emails[person.name] ?? ''}
-                            onChange={(e) =>
-                              setEmails((prev) => ({
-                                ...prev,
-                                [person.name]: e.target.value,
-                              }))
-                            }
-                          />
-                        </div>
-                      ))}
+                        )
+                      })}
                     </div>
-                    {!preview.people.some(
-                      (p) =>
-                        emails[p.name]?.trim().toLowerCase() ===
-                        currentUserEmail.toLowerCase(),
-                    ) ? (
-                      <p className="text-xs text-amber-600 dark:text-amber-500">
+                    {!meMapped ? (
+                      <p className="text-xs text-amber-700 dark:text-amber-500">
                         None of these is your own address, so you will be in the
                         group with a zero balance.
                       </p>
@@ -376,13 +479,13 @@ export function ImportSplitwiseDialog({
                       {needsRates.map((code) => (
                         <div key={code} className="flex items-center gap-2 text-sm">
                           <span className="w-24 shrink-0">1 {code} =</span>
-                          <Input
-                            inputMode="decimal"
-                            placeholder="0.00"
+                          <AmountInput
                             value={rates[code] ?? ''}
-                            onChange={(e) =>
-                              setRates((prev) => ({ ...prev, [code]: e.target.value }))
+                            onValueChange={(value) =>
+                              setRates((prev) => ({ ...prev, [code]: value }))
                             }
+                            placeholder="0.00"
+                            aria-label={`Value of 1 ${code} in ${base}`}
                           />
                           <span className="w-12 shrink-0">{base}</span>
                         </div>
@@ -395,9 +498,7 @@ export function ImportSplitwiseDialog({
                       <AlertTriangle className="size-4" aria-hidden />
                       <AlertTitle>
                         {preview.skipped_count
-                          ? `${preview.skipped_count} row${
-                              preview.skipped_count === 1 ? '' : 's'
-                            } will be skipped`
+                          ? `${pluralize(preview.skipped_count, 'row')} will be skipped`
                           : 'Worth a look'}
                       </AlertTitle>
                       <AlertDescription>
@@ -412,9 +513,9 @@ export function ImportSplitwiseDialog({
 
                   <div className="grid gap-2">
                     <Label>What will be created</Label>
-                    <div className="rounded-lg border">
+                    <div className="max-h-80 overflow-auto rounded-lg border">
                       <Table>
-                        <TableHeader>
+                        <TableHeader className="sticky top-0 bg-background">
                           <TableRow>
                             <TableHead className="w-28">Date</TableHead>
                             <TableHead>Description</TableHead>
@@ -429,9 +530,7 @@ export function ImportSplitwiseDialog({
                               className={entry.problem ? 'opacity-50' : undefined}
                             >
                               <TableCell className="text-muted-foreground">
-                                {entry.expense_date
-                                  ? formatDate(entry.expense_date)
-                                  : '—'}
+                                {entry.expense_date ? formatDate(entry.expense_date) : '—'}
                               </TableCell>
                               <TableCell>
                                 <span className="mr-1" aria-hidden>
@@ -465,25 +564,30 @@ export function ImportSplitwiseDialog({
             </div>
           </ScrollArea>
 
-          <DialogFooter className="mx-0 mb-0 border-t p-4">
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => setOpen(false)}
-              disabled={busy}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" disabled={!canSubmit}>
-              {busy && preview ? (
-                <Loader2 className="size-4 animate-spin" aria-hidden />
-              ) : (
-                <FileUp className="size-4" aria-hidden />
-              )}
-              {preview
-                ? `Import ${preview.expense_count + preview.settlement_count} rows`
-                : 'Import'}
-            </Button>
+          <DialogFooter className="mx-0 mb-0 flex-col items-stretch gap-3 border-t p-4 sm:flex-row sm:items-center">
+            <p className="flex-1 text-xs text-muted-foreground" aria-live="polite">
+              {blocker ?? 'Nothing has been written yet.'}
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => void requestClose(false)}
+                disabled={busy}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" disabled={busy || !preview}>
+                {busy && preview ? (
+                  <Loader2 className="size-4 animate-spin" aria-hidden />
+                ) : (
+                  <FileUp className="size-4" aria-hidden />
+                )}
+                {preview
+                  ? `Import ${preview.expense_count + preview.settlement_count} rows`
+                  : 'Import'}
+              </Button>
+            </div>
           </DialogFooter>
         </form>
       </DialogContent>

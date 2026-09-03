@@ -14,8 +14,8 @@ router = APIRouter(prefix="/groups/{group_id}", tags=["activity"])
 
 @router.get("/activity", response_model=list[ActivityOut])
 def group_activity(
-    limit: int = Query(default=100, le=300),
-    offset: int = 0,
+    limit: int = Query(default=100, ge=1, le=300),
+    offset: int = Query(default=0, ge=0),
     group: Group = Depends(load_group),
     db: Session = Depends(get_db),
 ) -> list[ActivityOut]:

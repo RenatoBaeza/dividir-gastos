@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..auth import current_user
 from ..db import get_db
-from ..dependencies import load_group, log_activity, rate_for, require_owner
+from ..dependencies import MissingRate, load_group, log_activity, require_owner
 from ..models import (
     AppUser,
     ExchangeRate,
@@ -31,7 +31,7 @@ from ..schemas import (
     RateOut,
     RateUpsert,
 )
-from ..services.ledger import group_ledger
+from ..services.ledger import balances_for_groups, group_ledger
 from ..services.money import ZERO, convert
 
 router = APIRouter(prefix="/groups", tags=["groups"])
@@ -67,28 +67,49 @@ def _group_out(db: Session, group: Group) -> GroupOut:
 def list_groups(
     db: Session = Depends(get_db), user: AppUser = Depends(current_user)
 ) -> list[GroupSummary]:
+    """Every group the caller belongs to, with its headline numbers.
+
+    Aggregates and ledgers are computed for all of the groups in one pass. Doing
+    it per group is the obvious shape and costs five round trips per row, which
+    is the difference between a fast dashboard and a slow one as soon as someone
+    is in more than a handful of groups.
+    """
     groups = db.scalars(
         select(Group)
         .join(GroupMember, GroupMember.group_id == Group.id)
         .where(GroupMember.user_id == user.id, Group.deleted_at.is_(None))
         .order_by(Group.created_at.desc())
     ).all()
+    if not groups:
+        return []
+
+    group_ids = [g.id for g in groups]
+
+    member_counts = dict(
+        db.execute(
+            select(GroupMember.group_id, func.count())
+            .where(GroupMember.group_id.in_(group_ids))
+            .group_by(GroupMember.group_id)
+        ).all()
+    )
+    spend = {
+        gid: (count, Decimal(total or 0))
+        for gid, count, total in db.execute(
+            select(
+                Expense.group_id,
+                func.count(),
+                func.coalesce(func.sum(Expense.amount_base), 0),
+            )
+            .where(Expense.group_id.in_(group_ids), Expense.deleted_at.is_(None))
+            .group_by(Expense.group_id)
+        ).all()
+    }
+    ledgers = balances_for_groups(db, group_ids)
 
     summaries: list[GroupSummary] = []
     for group in groups:
-        member_count = db.scalar(
-            select(func.count())
-            .select_from(GroupMember)
-            .where(GroupMember.group_id == group.id)
-        )
-        expense_count, total_spend = db.execute(
-            select(func.count(), func.coalesce(func.sum(Expense.amount_base), 0)).where(
-                Expense.group_id == group.id, Expense.deleted_at.is_(None)
-            )
-        ).one()
-
-        balances, _, _ = group_ledger(db, group)
-        balance = balances.get(user.id)
+        expense_count, total_spend = spend.get(group.id, (0, ZERO))
+        balance = ledgers.get(group.id, {}).get(user.id)
 
         summaries.append(
             GroupSummary(
@@ -96,9 +117,9 @@ def list_groups(
                 name=group.name,
                 description=group.description,
                 base_currency=group.base_currency,
-                member_count=member_count or 0,
-                expense_count=expense_count or 0,
-                total_spend=Decimal(total_spend or 0),
+                member_count=member_counts.get(group.id, 0),
+                expense_count=expense_count,
+                total_spend=total_spend,
                 your_net=balance.net if balance else ZERO,
             )
         )
@@ -189,10 +210,30 @@ def _reconvert_group(db: Session, group: Group) -> None:
 
     The converted amounts are denormalised, so changing the base currency has to
     rewrite them or the balances would silently drift.
+
+    The rate table is read once up front: looking a rate up per row turns a
+    currency switch into one query per expense, and this runs inside the request
+    that changed the rate.
     """
+    base = group.base_currency.upper()
+    table = {
+        r.currency.upper(): Decimal(r.rate_to_base)
+        for r in db.scalars(
+            select(ExchangeRate).where(ExchangeRate.group_id == group.id)
+        )
+    }
+
+    def rate_of(currency: str) -> Decimal:
+        currency = currency.upper()
+        if currency == base:
+            return Decimal(1)
+        if currency not in table:
+            raise MissingRate(currency, group.base_currency)
+        return table[currency]
+
     expenses = db.scalars(select(Expense).where(Expense.group_id == group.id)).all()
     for expense in expenses:
-        rate = rate_for(db, group, expense.currency)
+        rate = rate_of(expense.currency)
         expense.rate_to_base = rate
         expense.amount_base = convert(expense.amount, rate)
         for payer in expense.payers:
@@ -204,7 +245,7 @@ def _reconvert_group(db: Session, group: Group) -> None:
         select(Settlement).where(Settlement.group_id == group.id)
     ).all()
     for settlement in settlements:
-        rate = rate_for(db, group, settlement.currency)
+        rate = rate_of(settlement.currency)
         settlement.rate_to_base = rate
         settlement.amount_base = convert(settlement.amount, rate)
 

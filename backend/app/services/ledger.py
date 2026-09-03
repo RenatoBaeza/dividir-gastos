@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+from collections import defaultdict
+from collections.abc import Sequence
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -70,6 +72,56 @@ def group_ledger(
     simplified = simplify_debts({uid: b.net for uid, b in balances.items()})
 
     return balances, pairwise, simplified
+
+
+def balances_for_groups(
+    db: Session, group_ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, dict[uuid.UUID, MemberBalance]]:
+    """Net balances for several groups at once.
+
+    The dashboard needs one number per group, and doing that a group at a time
+    means five round trips per row. This reads every group's members, expenses
+    and repayments in three queries (plus the two SQLAlchemy issues eagerly for
+    payers and splits) and does the arithmetic in memory.
+    """
+    if not group_ids:
+        return {}
+
+    members: dict[uuid.UUID, list[uuid.UUID]] = defaultdict(list)
+    for gid, uid in db.execute(
+        select(GroupMember.group_id, GroupMember.user_id).where(
+            GroupMember.group_id.in_(group_ids)
+        )
+    ):
+        members[gid].append(uid)
+
+    expenses: dict[uuid.UUID, list[ExpenseFacts]] = defaultdict(list)
+    for expense in db.scalars(
+        select(Expense).where(
+            Expense.group_id.in_(group_ids), Expense.deleted_at.is_(None)
+        )
+    ):
+        expenses[expense.group_id].append(
+            ExpenseFacts(
+                payers={p.user_id: Decimal(p.amount_base) for p in expense.payers},
+                splits={s.user_id: Decimal(s.amount_base) for s in expense.splits},
+            )
+        )
+
+    settlements: dict[uuid.UUID, list[SettlementFacts]] = defaultdict(list)
+    for row in db.scalars(
+        select(Settlement).where(
+            Settlement.group_id.in_(group_ids), Settlement.deleted_at.is_(None)
+        )
+    ):
+        settlements[row.group_id].append(
+            SettlementFacts(row.from_user_id, row.to_user_id, Decimal(row.amount_base))
+        )
+
+    return {
+        gid: compute_balances(members[gid], expenses[gid], settlements[gid])
+        for gid in group_ids
+    }
 
 
 def net_for_user(db: Session, group: Group, user_id: uuid.UUID) -> Decimal:

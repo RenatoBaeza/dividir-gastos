@@ -4,7 +4,7 @@ import datetime as dt
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -12,13 +12,13 @@ from ..auth import current_user
 from ..db import get_db
 from ..dependencies import log_activity
 from ..models import AppUser, Group, GroupInvite, GroupMember
-from ..schemas import InviteOut, UserOut
+from ..schemas import InviteOut, Name, UserOut
 
 router = APIRouter(tags=["me"])
 
 
 class ProfileUpdate(BaseModel):
-    display_name: str = Field(min_length=1, max_length=120)
+    display_name: Name
 
 
 @router.get("/me", response_model=UserOut)

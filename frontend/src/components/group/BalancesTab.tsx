@@ -1,7 +1,9 @@
 import { useMemo, useState } from 'react'
-import { ArrowRight, HandCoins, Sparkles, Trash2 } from 'lucide-react'
+import { ArrowRight, HandCoins, Info, Sparkles, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 
+import { useConfirm } from '@/components/ConfirmDialog'
+import { MoneyDelta } from '@/components/MoneyDelta'
 import { PersonAvatar } from '@/components/PersonAvatar'
 import { SettleUpDialog, type SettlePrefill } from '@/components/SettleUpDialog'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -15,8 +17,10 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { api } from '@/lib/api'
-import { displayName, formatDate, formatMoney, num } from '@/lib/format'
+import { displayName, formatDate, formatMoney, pluralize } from '@/lib/format'
+import { usePersistentState } from '@/lib/usePersistentState'
 import type { Balances, Group, Settlement, Transfer } from '@/types'
 
 interface Props {
@@ -34,9 +38,12 @@ export function BalancesTab({
   currentUserId,
   onChanged,
 }: Props) {
-  const [simplify, setSimplify] = useState(true)
+  // Whichever view someone prefers, they prefer it every time.
+  const [simplify, setSimplify] = usePersistentState('balances.simplify', true)
   const [settleOpen, setSettleOpen] = useState(false)
   const [prefill, setPrefill] = useState<SettlePrefill | null>(null)
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const confirm = useConfirm()
 
   const people = useMemo(() => {
     const map = new Map(balances.balances.map((row) => [row.user.id, row.user]))
@@ -51,6 +58,9 @@ export function BalancesTab({
   }
 
   const plan: Transfer[] = simplify ? balances.simplified : balances.pairwise
+  const mine = plan.filter(
+    (t) => t.from_user_id === currentUserId || t.to_user_id === currentUserId,
+  )
 
   function settle(transfer?: Transfer) {
     setPrefill(
@@ -66,13 +76,30 @@ export function BalancesTab({
   }
 
   async function removeSettlement(settlement: Settlement) {
-    if (!window.confirm('Delete this repayment?')) return
+    const ok = await confirm({
+      title: 'Delete this repayment?',
+      description: (
+        <>
+          {nameOf(settlement.from_user_id)} paid {nameOf(settlement.to_user_id)}{' '}
+          {formatMoney(settlement.amount, settlement.currency)} on{' '}
+          {formatDate(settlement.settled_on)}. Deleting it puts that debt back on
+          the balances for everyone in the group.
+        </>
+      ),
+      confirmLabel: 'Delete repayment',
+      destructive: true,
+    })
+    if (!ok) return
+
+    setBusyId(settlement.id)
     try {
       await api.deleteSettlement(settlement.id)
       toast.success('Repayment deleted')
       onChanged()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Could not delete the repayment')
+    } finally {
+      setBusyId(null)
     }
   }
 
@@ -80,11 +107,13 @@ export function BalancesTab({
     <div className="space-y-6">
       {balances.missing_rates.length > 0 ? (
         <Alert variant="destructive">
-          <AlertTitle>Missing exchange rates</AlertTitle>
+          <AlertTitle>These totals are incomplete</AlertTitle>
           <AlertDescription>
-            {balances.missing_rates.join(', ')} have no rate to{' '}
-            {group.base_currency} yet, so these totals are incomplete. Add them
-            under Settings.
+            {balances.missing_rates.join(', ')} have no exchange rate to{' '}
+            {group.base_currency}, so expenses in{' '}
+            {balances.missing_rates.length === 1 ? 'that currency' : 'those currencies'}{' '}
+            are missing from every number on this page. Add the{' '}
+            {pluralize(balances.missing_rates.length, 'rate')} under Settings.
           </AlertDescription>
         </Alert>
       ) : null}
@@ -101,16 +130,20 @@ export function BalancesTab({
           <CardContent className="p-0">
             <ul className="divide-y">
               {balances.balances.map((row) => {
-                const net = num(row.net)
+                const isMe = row.user.id === currentUserId
                 return (
                   <li
                     key={row.user.id}
-                    className="flex items-center gap-3 px-6 py-3"
+                    className={
+                      isMe
+                        ? 'flex items-center gap-3 bg-muted/40 px-6 py-3'
+                        : 'flex items-center gap-3 px-6 py-3'
+                    }
                   >
                     <PersonAvatar user={row.user} />
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium">
-                        {row.user.id === currentUserId ? 'You' : displayName(row.user)}
+                        {isMe ? 'You' : displayName(row.user)}
                       </p>
                       <p className="text-xs text-muted-foreground">
                         paid {formatMoney(row.paid, group.base_currency)} · share{' '}
@@ -118,22 +151,18 @@ export function BalancesTab({
                       </p>
                     </div>
                     <div className="text-right">
-                      <p className="text-xs text-muted-foreground">
-                        {net > 0 ? 'is owed' : net < 0 ? 'owes' : 'settled up'}
-                      </p>
-                      <p
-                        className={
-                          net > 0
-                            ? 'font-medium tabular-nums text-emerald-600 dark:text-emerald-400'
-                            : net < 0
-                              ? 'font-medium tabular-nums text-rose-600 dark:text-rose-400'
-                              : 'font-medium tabular-nums text-muted-foreground'
+                      <MoneyDelta
+                        amount={row.net}
+                        currency={group.base_currency}
+                        showLabel
+                        labels={
+                          isMe
+                            ? ['you are owed', 'you owe', 'settled up']
+                            : ['is owed', 'owes', 'settled up']
                         }
-                      >
-                        {net === 0
-                          ? '—'
-                          : formatMoney(Math.abs(net), group.base_currency)}
-                      </p>
+                        className="flex flex-col items-end"
+                        labelClassName="mr-0 block text-muted-foreground"
+                      />
                     </div>
                   </li>
                 )
@@ -145,29 +174,45 @@ export function BalancesTab({
         {/* ---------------- settle-up plan ---------------- */}
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
+            <CardTitle className="flex flex-wrap items-center gap-2 text-base">
               Settle up
               {simplify && balances.transfers_saved > 0 ? (
                 <Badge variant="secondary" className="gap-1">
                   <Sparkles className="size-3" aria-hidden />
-                  {balances.transfers_saved} fewer payment
-                  {balances.transfers_saved === 1 ? '' : 's'}
+                  {pluralize(balances.transfers_saved, 'fewer payment', 'fewer payments')}
                 </Badge>
               ) : null}
             </CardTitle>
             <CardDescription>
               {formatMoney(balances.total_outstanding, group.base_currency)} outstanding
-              across {plan.length} payment{plan.length === 1 ? '' : 's'}.
+              across {pluralize(plan.length, 'payment')}.
             </CardDescription>
             <div className="flex items-center gap-2 pt-2">
-              <Switch
-                id="simplify"
-                checked={simplify}
-                onCheckedChange={setSimplify}
-              />
+              <Switch id="simplify" checked={simplify} onCheckedChange={setSimplify} />
               <label htmlFor="simplify" className="text-xs text-muted-foreground">
                 Simplify debts
               </label>
+              {/* A switch that silently rearranges who pays whom needs to say
+                  what it does before someone transfers money on its say-so. */}
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <button
+                      type="button"
+                      className="text-muted-foreground hover:text-foreground"
+                      aria-label="What does simplifying debts do?"
+                    />
+                  }
+                >
+                  <Info className="size-3.5" aria-hidden />
+                </TooltipTrigger>
+                <TooltipContent className="max-w-64">
+                  On: everyone ends up square in the fewest possible transfers,
+                  which can mean paying someone you never shared an expense with.
+                  Off: each pair settles exactly what passed between the two of
+                  them.
+                </TooltipContent>
+              </Tooltip>
             </div>
           </CardHeader>
           <CardContent className="p-0">
@@ -176,31 +221,52 @@ export function BalancesTab({
                 Everyone is square. Nothing to pay.
               </p>
             ) : (
-              <ul className="divide-y">
-                {plan.map((transfer, index) => (
-                  <li
-                    key={`${transfer.from_user_id}-${transfer.to_user_id}-${index}`}
-                    className="flex items-center gap-3 px-6 py-3"
-                  >
-                    <div className="min-w-0 flex-1 text-sm">
-                      <span className="font-medium">
-                        {nameOf(transfer.from_user_id)}
-                      </span>
-                      <ArrowRight
-                        className="mx-2 inline size-3 text-muted-foreground"
-                        aria-hidden
-                      />
-                      <span className="font-medium">{nameOf(transfer.to_user_id)}</span>
-                    </div>
-                    <span className="tabular-nums">
-                      {formatMoney(transfer.amount, group.base_currency)}
-                    </span>
-                    <Button size="sm" variant="outline" onClick={() => settle(transfer)}>
-                      Record
-                    </Button>
-                  </li>
-                ))}
-              </ul>
+              <>
+                {mine.length > 0 ? (
+                  <p className="px-6 pb-2 text-xs text-muted-foreground">
+                    {pluralize(mine.length, 'payment')} involving you.
+                  </p>
+                ) : null}
+                <ul className="divide-y">
+                  {plan.map((transfer, index) => {
+                    const involvesMe =
+                      transfer.from_user_id === currentUserId ||
+                      transfer.to_user_id === currentUserId
+                    return (
+                      <li
+                        key={`${transfer.from_user_id}-${transfer.to_user_id}-${index}`}
+                        className={
+                          involvesMe
+                            ? 'flex flex-wrap items-center gap-3 bg-muted/40 px-6 py-3'
+                            : 'flex flex-wrap items-center gap-3 px-6 py-3'
+                        }
+                      >
+                        <div className="min-w-0 flex-1 text-sm">
+                          <span className="font-medium">{nameOf(transfer.from_user_id)}</span>
+                          <ArrowRight
+                            className="mx-2 inline size-3 text-muted-foreground"
+                            aria-label="pays"
+                          />
+                          <span className="font-medium">{nameOf(transfer.to_user_id)}</span>
+                        </div>
+                        <span className="tabular-nums">
+                          {formatMoney(transfer.amount, group.base_currency)}
+                        </span>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => settle(transfer)}
+                          aria-label={`Record ${nameOf(transfer.from_user_id)} paying ${nameOf(
+                            transfer.to_user_id,
+                          )} ${formatMoney(transfer.amount, group.base_currency)}`}
+                        >
+                          Record
+                        </Button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </>
             )}
           </CardContent>
         </Card>
@@ -213,12 +279,7 @@ export function BalancesTab({
           <CardDescription>
             Payments already made, in or outside the app.
           </CardDescription>
-          <Button
-            className="mt-2 w-fit"
-            size="sm"
-            variant="outline"
-            onClick={() => settle()}
-          >
+          <Button className="mt-2 w-fit" size="sm" variant="outline" onClick={() => settle()}>
             <HandCoins className="size-4" aria-hidden />
             Record a repayment
           </Button>
@@ -226,7 +287,8 @@ export function BalancesTab({
         <CardContent className="p-0">
           {settlements.length === 0 ? (
             <p className="px-6 pb-6 text-sm text-muted-foreground">
-              No repayments recorded yet.
+              No repayments recorded yet. Log one whenever money actually changes
+              hands — this app never moves it for you.
             </p>
           ) : (
             <ul className="divide-y">
@@ -234,13 +296,9 @@ export function BalancesTab({
                 <li key={settlement.id} className="flex items-center gap-3 px-6 py-3">
                   <div className="min-w-0 flex-1">
                     <p className="text-sm">
-                      <span className="font-medium">
-                        {nameOf(settlement.from_user_id)}
-                      </span>{' '}
+                      <span className="font-medium">{nameOf(settlement.from_user_id)}</span>{' '}
                       paid{' '}
-                      <span className="font-medium">
-                        {nameOf(settlement.to_user_id)}
-                      </span>{' '}
+                      <span className="font-medium">{nameOf(settlement.to_user_id)}</span>{' '}
                       {formatMoney(settlement.amount, settlement.currency)}
                     </p>
                     <p className="text-xs text-muted-foreground">
@@ -254,7 +312,10 @@ export function BalancesTab({
                   <Button
                     variant="ghost"
                     size="icon"
-                    aria-label="Delete repayment"
+                    disabled={busyId === settlement.id}
+                    aria-label={`Delete the repayment from ${nameOf(
+                      settlement.from_user_id,
+                    )} to ${nameOf(settlement.to_user_id)}`}
                     onClick={() => void removeSettlement(settlement)}
                   >
                     <Trash2 className="size-4" aria-hidden />

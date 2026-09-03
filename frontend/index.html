@@ -3,11 +3,49 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Dividir Gastos</title>
+    <meta
+      name="description"
+      content="Share expenses with friends and settle up in as few payments as possible."
+    />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0a0a0a" />
+    <meta name="apple-mobile-web-app-title" content="Dividir Gastos" />
+    <meta property="og:title" content="Dividir Gastos" />
+    <meta
+      property="og:description"
+      content="Share expenses with friends and settle up in as few payments as possible."
+    />
+    <meta property="og:type" content="website" />
+
+    <script>
+      // Applied before the first paint. Without it a person who chose dark gets
+      // a full white flash on every load, which is the whole thing they were
+      // trying to avoid.
+      ;(function () {
+        try {
+          var stored = localStorage.getItem('theme')
+          var dark =
+            stored === 'dark' ||
+            ((!stored || stored === 'system') &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches)
+          if (dark) document.documentElement.classList.add('dark')
+          document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
+        } catch (e) {
+          /* storage blocked; the provider sorts it out on mount */
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>
+    <noscript>
+      <p style="font-family: system-ui, sans-serif; padding: 2rem">
+        Dividir Gastos needs JavaScript to run. Please enable it and reload.
+      </p>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

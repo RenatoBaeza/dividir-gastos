@@ -37,6 +37,14 @@ const CATEGORY_ICONS: Record<string, string> = {
   other: '📦',
 }
 
+/** Currencies that are not divided into hundredths. Showing "¥1,200.00" is
+ *  wrong in the same way "$12" is: it reads as a different amount. */
+const ZERO_DECIMAL = new Set(['JPY', 'KRW', 'VND', 'CLP', 'IDR'])
+
+export function currencyDecimals(currency: string): number {
+  return ZERO_DECIMAL.has(currency.toUpperCase()) ? 0 : 2
+}
+
 export function categoryIcon(category: string): string {
   return CATEGORY_ICONS[category] ?? CATEGORY_ICONS.general
 }
@@ -51,19 +59,32 @@ export function num(value: string | number | null | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0
 }
 
+/** True when the text is a number we can accept as money — used to tell an
+ *  empty field apart from a field holding "12,50" or "abc". */
+export function isAmountLike(value: string): boolean {
+  return /^\d*([.,]\d*)?$/.test(value.trim())
+}
+
 export function formatMoney(
   value: string | number | null | undefined,
   currency: string,
   opts: { signed?: boolean } = {},
 ): string {
   const amount = num(value)
-  const formatted = new Intl.NumberFormat(undefined, {
-    style: 'currency',
-    currency,
-    currencyDisplay: 'narrowSymbol',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(Math.abs(amount))
+  const digits = currencyDecimals(currency)
+  let formatted: string
+  try {
+    formatted = new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency,
+      currencyDisplay: 'narrowSymbol',
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    }).format(Math.abs(amount))
+  } catch {
+    // An unknown ISO code would otherwise throw and blank the whole screen.
+    formatted = `${Math.abs(amount).toFixed(digits)} ${currency}`
+  }
 
   if (opts.signed && amount > 0) return `+${formatted}`
   if (amount < 0) return `-${formatted}`
@@ -75,20 +96,58 @@ export function toAmountString(value: number): string {
   return (Math.round(value * 100) / 100).toFixed(2)
 }
 
-export function formatDate(iso: string): string {
-  return new Date(iso.length <= 10 ? `${iso}T00:00:00` : iso).toLocaleDateString(
-    undefined,
-    { day: 'numeric', month: 'short', year: 'numeric' },
+function parseDay(iso: string): Date {
+  return new Date(iso.length <= 10 ? `${iso}T00:00:00` : iso)
+}
+
+/** Whole days between a date and today, in the reader's own timezone. */
+function daysAgo(date: Date): number {
+  const startOf = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate())
+  return Math.round(
+    (startOf(new Date()).getTime() - startOf(date).getTime()) / 86_400_000,
   )
 }
 
-export function formatDateTime(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, {
+export function formatDate(iso: string): string {
+  const date = parseDay(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleDateString(undefined, {
     day: 'numeric',
     month: 'short',
-    hour: '2-digit',
+    // A year is noise until it is not the current one.
+    year: date.getFullYear() === new Date().getFullYear() ? undefined : 'numeric',
+  })
+}
+
+/** "Today" and "Yesterday" are how people actually talk about recent spending. */
+export function formatDateRelative(iso: string): string {
+  const date = parseDay(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  const days = daysAgo(date)
+  if (days === 0) return 'Today'
+  if (days === 1) return 'Yesterday'
+  if (days === -1) return 'Tomorrow'
+  if (days > 1 && days < 7) return `${days} days ago`
+  return formatDate(iso)
+}
+
+export function formatDateTime(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  const time = date.toLocaleTimeString(undefined, {
+    hour: 'numeric',
     minute: '2-digit',
   })
+  const days = daysAgo(date)
+  if (days === 0) return `Today at ${time}`
+  if (days === 1) return `Yesterday at ${time}`
+  return `${formatDate(iso)} at ${time}`
+}
+
+/** Full, unambiguous timestamp — for the `title` of an abbreviated one. */
+export function formatDateTimeFull(iso: string): string {
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString()
 }
 
 export function today(): string {
@@ -105,4 +164,14 @@ export function initials(name: string, email: string): string {
 
 export function displayName(user: { display_name: string; email: string }): string {
   return user.display_name.trim() || user.email
+}
+
+/** Deliberately permissive: the server and the mail provider are the real
+ *  authorities. This only catches the obvious typo before a round trip. */
+export function looksLikeEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value.trim())
+}
+
+export function pluralize(count: number, one: string, many = `${one}s`): string {
+  return `${count} ${count === 1 ? one : many}`
 }

@@ -32,6 +32,22 @@ export class ApiError extends Error {
   }
 }
 
+/** How long to wait before deciding the server is not going to answer. Without
+ *  this a dead API leaves a spinner turning forever with nothing to act on. */
+const TIMEOUT_MS = 20_000
+
+/** `fetch` rejects with "Failed to fetch" for DNS, CORS, offline and a dozen
+ *  other causes. None of those are a sentence a person can act on. */
+function networkError(cause: unknown): ApiError {
+  if (cause instanceof DOMException && cause.name === 'AbortError') {
+    return new ApiError(0, 'The server took too long to answer. Try again.')
+  }
+  if (!navigator.onLine) {
+    return new ApiError(0, 'You are offline. Reconnect and try again.')
+  }
+  return new ApiError(0, 'Could not reach the server. Check your connection and try again.')
+}
+
 async function authHeader(): Promise<Record<string, string>> {
   if (devEmail) return { Authorization: `Dev ${devEmail}` }
   if (!supabase) return {}
@@ -50,31 +66,61 @@ async function request<T>(
     if (value !== undefined && value !== '') url.searchParams.set(key, String(value))
   }
 
-  const response = await fetch(url, {
-    ...rest,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(await authHeader()),
-      ...rest.headers,
-    },
-  })
+  const timeout = AbortSignal.timeout
+    ? AbortSignal.timeout(TIMEOUT_MS)
+    : undefined
+
+  let response: Response
+  try {
+    response = await fetch(url, {
+      ...rest,
+      signal: rest.signal ?? timeout,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(await authHeader()),
+        ...rest.headers,
+      },
+    })
+  } catch (cause) {
+    throw networkError(cause)
+  }
 
   if (response.status === 204) return undefined as T
+
   const text = await response.text()
-  const body = text ? JSON.parse(text) : null
+  let body: { detail?: unknown } | null = null
+  try {
+    body = text ? JSON.parse(text) : null
+  } catch {
+    // An HTML error page from a proxy, not the API. Fall through to the
+    // status-based message below rather than showing the person raw markup.
+  }
 
   if (!response.ok) {
     const detail = body?.detail
     const message =
-      typeof detail === 'string'
+      typeof detail === 'string' && detail
         ? detail
         : Array.isArray(detail)
-          ? detail.map((d: { msg?: string }) => d.msg ?? '').join(', ')
-          : `Request failed (${response.status})`
+          ? detail.map((d: { msg?: string }) => d.msg ?? '').filter(Boolean).join(', ')
+          : STATUS_MESSAGES[response.status] ?? `Something went wrong (${response.status}).`
     throw new ApiError(response.status, message)
   }
 
   return body as T
+}
+
+/** Plain-language fallbacks for the statuses a person can actually hit. */
+const STATUS_MESSAGES: Record<number, string> = {
+  401: 'Your session expired. Sign in again.',
+  403: 'You do not have access to that.',
+  404: 'That is gone — someone may have deleted it.',
+  409: 'Someone changed this while you were editing. Reload and try again.',
+  429: 'Too many requests in a row. Wait a moment and try again.',
+  500: 'The server hit an error. Try again in a moment.',
+  502: 'The server is not responding. Try again in a moment.',
+  503: 'The server is not responding. Try again in a moment.',
+  504: 'The server took too long to answer. Try again.',
 }
 
 const json = (body: unknown) => ({ body: JSON.stringify(body) })
